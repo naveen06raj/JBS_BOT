@@ -6,7 +6,9 @@ pandas
 langgraph==0.5.1
 langchain
 langgraph
-fastapi uvicorn
+fastapi
+uvicorn
 langchain-mcp-adapters==0.1.8
 pandas
 matplotlib
+python-dotenv
