@@ -138,7 +138,7 @@ def reload_schema_map_module():
     This is used by main.py to get the freshest SCHEMA_MAP after an update.
     """
     try:
-        module_name = 'src.database.Schema_map'
+        module_name = 'database.Schema_map'
         if module_name in importlib.sys.modules:
             module = importlib.reload(importlib.sys.modules[module_name])
         else:
