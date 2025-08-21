@@ -10,9 +10,9 @@ from langchain_google_vertexai import ChatVertexAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-from src.database.db_connector import DatabaseConnector
-from src.database.Schema_full import fetch_full_schema_dataframe
-from src.utils.schema_comparer import get_refined_schema_for_llm 
+from database.db_connector import DatabaseConnector
+from database.Schema_full import fetch_full_schema_dataframe
+from utils.schema_comparer import get_refined_schema_for_llm 
 
 
 # Setup logging

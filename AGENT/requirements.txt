@@ -3,7 +3,7 @@ python-dotenv
 fastapi
 langchain-google-vertexai==2.0.27
 pandas
-langgraph==0.5.1
+langgraph
 langchain
 uvicorn
 langchain-mcp-adapters==0.1.8

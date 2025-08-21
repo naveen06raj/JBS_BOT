@@ -21,15 +21,15 @@ from langgraph.graph import StateGraph, END
 from langchain_core.messages import BaseMessage
 
 # Import custom modules
-from src.agents.primary_router import PrimaryRouterAgent
-from src.agents.router_agent import SQLRouterAgent
-from src.agents.sql_agent import SQLAgent
-from src.agents.mcp_agent import setup_agent_for_ui, invoke_agent_with_history, mcp_tools
-from src.agents.visualization_agent import VisualizationAgent
-from src.database.db_connector import DatabaseConnector
-from src.database.Schema_full import fetch_full_schema_dataframe
-from src.utils.schema_updater import update_schema_map_file, reload_schema_map_module
-from src.utils.schema_comparer import get_refined_schema_for_llm
+from agents.primary_router import PrimaryRouterAgent
+from agents.router_agent import SQLRouterAgent
+from agents.sql_agent import SQLAgent
+from agents.mcp_agent import setup_agent_for_ui, invoke_agent_with_history, mcp_tools
+from agents.visualization_agent import VisualizationAgent
+from database.db_connector import DatabaseConnector
+from database.Schema_full import fetch_full_schema_dataframe
+from utils.schema_updater import update_schema_map_file, reload_schema_map_module
+from utils.schema_comparer import get_refined_schema_for_llm
 
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

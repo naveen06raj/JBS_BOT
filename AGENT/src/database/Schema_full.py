@@ -8,7 +8,7 @@ import os
 # from dotenv import load_dotenv # Removed as per user preference
 
 # Corrected Import: Only DatabaseConnector is directly used here
-from src.database.db_connector import DatabaseConnector
+from database.db_connector import DatabaseConnector
 
 # --- SQL Query to Fetch Full Schema Details (FINAL COMPREHENSIVE VERSION FOR YOUR DB) ---
 # This query correctly handles your information_schema structure to get FK details.

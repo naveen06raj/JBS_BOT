@@ -9,7 +9,7 @@ from langchain_google_vertexai import ChatVertexAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 
-from src.database.Schema_map import SCHEMA_MAP 
+from database.Schema_map import SCHEMA_MAP 
 
 # --- Load Environment Variables ---
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../config/.env'))

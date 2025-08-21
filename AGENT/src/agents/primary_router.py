@@ -11,7 +11,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 
 # Import CRM tools for dynamic tool definitions
-from src.agents.mcp_agent import mcp_tools
+from agents.mcp_agent import mcp_tools
 
 # --- Load environment variables ---
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../config/.env'))

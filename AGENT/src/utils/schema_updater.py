@@ -10,8 +10,8 @@ import asyncio
 import pprint # For robust Python literal output
 from typing import Dict, List, Any
 
-from src.database.db_connector import DatabaseConnector
-from src.database.Schema_full import GET_SCHEMA_SQL, fetch_full_schema_dataframe # To get the schema DataFrame
+from database.db_connector import DatabaseConnector
+from database.Schema_full import GET_SCHEMA_SQL, fetch_full_schema_dataframe # To get the schema DataFrame
 
 # Set up basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
