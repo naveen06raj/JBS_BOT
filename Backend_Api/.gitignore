@@ -47,7 +47,6 @@ bld/
 *.pidb
 *.svclog
 *.scc
-launchSettings.json
 
 # ReSharper is a .NET coding add-in
 _ReSharper*/
