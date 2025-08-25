@@ -1,5 +1,3 @@
-# src/agents/primary_router.py
-
 import json
 import os
 from typing import Dict, Any, List, Optional
@@ -9,6 +7,7 @@ import logging
 from langchain_google_vertexai import ChatVertexAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.messages import BaseMessage
 
 # Import CRM tools for dynamic tool definitions
 from agents.mcp_agent import mcp_tools
@@ -75,6 +74,10 @@ class PrimaryRouterAgent:
             "CRM_AGENT": {
                 "name": "CRM_AGENT",
                 "description": "Handles queries that require interacting with the CRM system, like retrieving specific lead or opportunity details by ID. This agent should be the primary choice for direct record lookups. **However, if a specific CRM tool is not a perfect match, you can propose 'SQL_ROUTER_AGENT' as a fallback to query the database for a broader search.**"
+            },
+            "CONTINUE_CONVERSATION": {
+                "name": "CONTINUE_CONVERSATION",
+                "description": "Use for follow-up questions that do not require a new tool, for example, simple thanks or clarifying a previous answer provided by the AI."
             }
         }
 
@@ -89,7 +92,8 @@ class PrimaryRouterAgent:
             [self.tool_definitions["CLARIFY_QUERY"]] +
             [self.tool_definitions["SQL_ROUTER_AGENT"]] +
             [self.tool_definitions["VISUALIZATION_AGENT"]] +
-            [self.tool_definitions["GENERAL_QUERY"]]
+            [self.tool_definitions["GENERAL_QUERY"]] +
+            [self.tool_definitions["CONTINUE_CONVERSATION"]]
         )
 
         # Update the prompt to include the fallback logic.
@@ -97,13 +101,16 @@ class PrimaryRouterAgent:
             ("system",
              """
              You are an expert routing agent that determines the best tool(s) for a user query.
+             You have access to the conversation history to help you make your decision.
+
              Follow this priority hierarchy and special cases:
 
              --- HIERARCHICAL PRIORITY ---
-             1. CRM_AGENT: For specific CRM tool operations (e.g., retrieving a single record by ID).
-             2. CLARIFY_QUERY: For ambiguous/missing parameter requests.
-             3. SQL_ROUTER_AGENT: For database queries/analysis.
-             4. GENERAL_QUERY: For all other cases.
+             1. CONTINUE_CONVERSATION: Use if the user's query is a simple follow-up, thanks, or an acknowledgement that doesn't require a new data lookup.
+             2. CRM_AGENT: For specific CRM tool operations (e.g., retrieving a single record by ID).
+             3. CLARIFY_QUERY: For ambiguous/missing parameter requests.
+             4. SQL_ROUTER_AGENT: For database queries/analysis.
+             5. GENERAL_QUERY: For all other cases.
 
              --- SPECIAL CASES ---
              * CRM_AGENT and SQL_ROUTER_AGENT Fallback:
@@ -123,7 +130,8 @@ class PrimaryRouterAgent:
              - reasoning: Explanation of decision
              """
             ),
-            ("user", "{user_query}")
+            # Add the conversation history and current query to the prompt
+            ("user", "Conversation History:\n{chat_history}\n\nUser Query: {user_query}")
         ]).partial(
             available_tools=json.dumps(available_tools, indent=2),
             visualization_keywords=", ".join(f"'{kw}'" for kw in self.visualization_keywords)
@@ -131,9 +139,9 @@ class PrimaryRouterAgent:
 
         self.routing_chain = self.prompt | self.llm | self.parser
 
-    async def route_query(self, user_query: str) -> Dict[str, Any]:
+    async def route_query(self, user_query: str, chat_history: List[BaseMessage]) -> Dict[str, Any]:
         """
-        Routes user queries with support for visualization requests.
+        Routes user queries with support for visualization requests and conversational context.
         Returns dict with:
         - tool_name: Primary tool
         - secondary_tool: Optional secondary tool (e.g., VISUALIZATION_AGENT)
@@ -141,26 +149,34 @@ class PrimaryRouterAgent:
         - reasoning: Explanation of routing decision
         """
         try:
-            routing_decision = await self.routing_chain.ainvoke({"user_query": user_query})
+            # Format the chat history for the prompt
+            formatted_history = "\n".join([f"{msg.type}: {msg.content}" for msg in chat_history])
+            
+            routing_decision = await self.routing_chain.ainvoke({
+                "user_query": user_query,
+                "chat_history": formatted_history
+            })
             
             if not isinstance(routing_decision, dict):
-                routing_decision = {"tool_name": "GENERAL_QUERY", "reasoning": "Invalid routing decision format"}
+                logging.warning(f"Invalid routing decision format. Received: {routing_decision}")
+                return {"tool_name": "GENERAL_QUERY", "reasoning": "Invalid routing decision format"}
             
-            # This logic should be handled by the LLM's prompt now.
-            # We can still keep the explicit check to be safe.
-            if self._is_visualization_request(user_query):
-                routing_decision.setdefault("secondary_tool", "VISUALIZATION_AGENT")
+            # The LLM's prompt should handle this, but keep as a fallback check
+            # This logic is now redundant and can be removed, as the LLM is
+            # instructed to handle the secondary tool.
+            # I am removing this section of code now.
             
             return routing_decision
             
         except Exception as e:
-            logging.error(f"Error during primary routing: {e}")
+            logging.error(f"Error during primary routing: {e}", exc_info=True)
             return {
                 "tool_name": "GENERAL_QUERY",
-                "reasoning": f"Error during routing: {e}",
+                "reasoning": f"An error occurred during routing: {e}",
                 "error": str(e)
             }
 
+    # This method is no longer needed since the LLM handles the logic.
     def _is_visualization_request(self, query: str) -> bool:
         """Check if the query contains visualization-related keywords."""
         query_lower = query.lower()
