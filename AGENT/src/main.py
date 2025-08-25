@@ -9,7 +9,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from decimal import Decimal
 from fastapi.encoders import jsonable_encoder
-from typing import Annotated
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -27,9 +26,7 @@ from agents.sql_agent import SQLAgent
 from agents.mcp_agent import setup_agent_for_ui, invoke_agent_with_history, mcp_tools
 from agents.visualization_agent import VisualizationAgent
 from database.db_connector import DatabaseConnector
-from database.Schema_full import fetch_full_schema_dataframe
 from utils.schema_updater import update_schema_map_file, reload_schema_map_module
-from utils.schema_comparer import get_refined_schema_for_llm
 
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -192,7 +189,7 @@ class GraphState(TypedDict):
     sql_query: str
     sql_results: List[Dict[str, Any]]
     final_response: str
-    error_message: Annotated[List[str], "error_messages"]
+    error_message: str
     db_schema_df: pd.DataFrame
     relevant_db_schema_df: pd.DataFrame
     chat_history: List[BaseMessage]
@@ -281,7 +278,6 @@ async def execute_sql_node(state: GraphState) -> Dict[str, Any]:
         logging.error(f"NODE: execute_sql_node - Error executing SQL: {e}", exc_info=True)
         return {"sql_results": [], "error_message": f"An error occurred during SQL execution: {e}"}
 
-# In your main script, replace the existing call_crm_agent_node with this version.
 async def call_crm_agent_node(state: GraphState) -> Dict[str, Any]:
     """Node to invoke the CRM agent and check for failure messages."""
     logging.info(f"NODE: call_crm_agent_node - Calling CRM Agent with query: {state['user_query']}")
@@ -348,7 +344,6 @@ async def generate_final_response_node(state: GraphState) -> Dict[str, Any]:
         if state.get("final_response"):
             response = state["final_response"]
         else:
-            # --- START of changed code ---
             # Pre-format the SQL results into a Markdown table string
             formatted_sql_results = ""
             if state.get('sql_results'):
@@ -361,7 +356,6 @@ async def generate_final_response_node(state: GraphState) -> Dict[str, Any]:
                 "sql_results": formatted_sql_results,
                 "error_message": state.get('error_message', '')
             })
-            # --- END of changed code ---
         
         logging.info(f"NODE: generate_final_response_node - Final Response: {response}")
         return {"final_response": response, "error_message": "", "visualization_data": {"chart_image_base64": chart_image_base64}}
@@ -389,6 +383,18 @@ async def handle_error_node(state: GraphState) -> Dict[str, Any]:
         "\nPlease try rephrasing your question or contact support if the problem persists."
     )
     return {"final_response": user_facing_error, "error_message": state.get('error_message'), "visualization_data": None}
+
+# NEW NODE: Handles the state update for the CRM fallback
+async def crm_fallback_node(state: GraphState) -> Dict[str, Any]:
+    """Node to set up the state for SQL fallback."""
+    logging.warning("NODE: crm_fallback_node - CRM agent failed, re-routing to SQL path.")
+    return {
+        "routing_decision": {
+            "tool_name": "SQL_ROUTER_AGENT",
+            "reasoning": "Fallback from CRM agent failure."
+        },
+        "error_message": ""
+    }
 
 # --- LangGraph Conditional Edges Logic ---
 def primary_route_decision(state: GraphState) -> str:
@@ -426,34 +432,23 @@ def check_for_error(state: GraphState) -> str:
     if state.get("error_message"):
         return "handle_error"
     return "continue"
-# In your main script, replace the existing crm_fallback_decision with this version.
+
+# CORRECTED: This function no longer modifies state.
 def crm_fallback_decision(state: GraphState) -> str:
     """Decides whether to fallback to SQL based on the CRM agent's result."""
     error = state.get("error_message")
     routing_decision = state.get("routing_decision", {})
     fallback_tool = routing_decision.get("fallback_tool")
-    
-    # If the CRM agent failed and a fallback is defined...
+
     if error and fallback_tool == "SQL_ROUTER_AGENT":
-        # Log the fallback decision
-        logging.warning("NODE: crm_fallback_decision - CRM agent failed, falling back to SQL.")
-        
-        # We need to re-route the query to the SQL path.
-        # The next node needs the `routing_decision` to be for SQL.
-        # Clear the error message so the SQL path doesn't immediately fail.
-        # CRITICAL: We update the state in-place to avoid the concurrency issue.
-        state["routing_decision"]["tool_name"] = "SQL_ROUTER_AGENT"
-        state["routing_decision"]["reasoning"] = "Fallback from CRM agent failure."
-        state["error_message"] = "" 
-        
-        return "sql_route_node"
+        # We now route to the new node that handles the state change.
+        return "crm_fallback_node"
     
-    # If there's an error but no fallback, or a different fallback, go to error handler.
     if error:
         return "handle_error"
         
-    # If the CRM call was successful, continue to the visualization node.
     return "visualization_node"
+
 
 # --- LangGraph Workflow Definition ---
 workflow = StateGraph(GraphState)
@@ -469,6 +464,7 @@ workflow.add_node("visualization_node", visualization_node)
 workflow.add_node("generate_final_response", generate_final_response_node)
 workflow.add_node("general_response", general_query_response_node)
 workflow.add_node("handle_error", handle_error_node)
+workflow.add_node("crm_fallback_node", crm_fallback_node) # ADDED
 
 # Set the entry point
 workflow.set_entry_point("primary_route_node")
@@ -514,17 +510,22 @@ workflow.add_conditional_edges(
         "handle_error": "handle_error"
     }
 )
+
+# CORRECTED EDGE: Routes to the new crm_fallback_node on failure.
 workflow.add_conditional_edges(
     "call_crm_agent",
     crm_fallback_decision,
     {
-        "sql_route_node": "sql_route_node", # The new fallback path
+        "crm_fallback_node": "crm_fallback_node", 
         "visualization_node": "visualization_node",
         "handle_error": "handle_error"
     }
 )
 
-workflow.add_edge("call_crm_agent", "visualization_node")
+# ADDED EDGE: This new edge connects the fallback node to the SQL path
+workflow.add_edge("crm_fallback_node", "sql_route_node")
+
+# Remaining edges
 workflow.add_edge("visualization_node", "generate_final_response")
 workflow.add_edge("general_response", "generate_final_response")
 workflow.add_edge("generate_final_response", END)
