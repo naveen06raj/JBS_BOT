@@ -9,7 +9,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from decimal import Decimal
 from fastapi.encoders import jsonable_encoder
-from typing import Annotated
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -18,7 +17,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_google_vertexai import ChatVertexAI
 from langgraph.graph import StateGraph, END
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 
 # Import custom modules
 from agents.primary_router import PrimaryRouterAgent
@@ -27,9 +26,7 @@ from agents.sql_agent import SQLAgent
 from agents.mcp_agent import setup_agent_for_ui, invoke_agent_with_history, mcp_tools
 from agents.visualization_agent import VisualizationAgent
 from database.db_connector import DatabaseConnector
-from database.Schema_full import fetch_full_schema_dataframe
 from utils.schema_updater import update_schema_map_file, reload_schema_map_module
-from utils.schema_comparer import get_refined_schema_for_llm
 
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -64,23 +61,16 @@ def format_results_to_markdown_table(sql_results: List[Dict[str, Any]]) -> str:
     if not sql_results:
         return "No data found."
     
-    # Use pandas to easily create the table, then convert to a Markdown string
     try:
         df = pd.DataFrame(sql_results)
         
-        # Get column headers
         headers = " | ".join(df.columns)
-        
-        # Create the separator line
         separator = " | ".join(['---'] * len(df.columns))
-        
-        # Create the data rows
         rows = []
         for _, row in df.iterrows():
             row_values = [str(row[col]) for col in df.columns]
             rows.append(" | ".join(row_values))
             
-        # Join everything together
         markdown_table = f"| {headers} |\n| {separator} |\n" + "\n".join([f"| {row} |" for row in rows])
         
         return markdown_table
@@ -108,6 +98,8 @@ class QueryRequest(BaseModel):
     include_sql: Optional[bool] = False
     include_results: Optional[bool] = False
     include_visualization: Optional[bool] = True
+    # ADDED: This field will hold the conversation history
+    chat_history: Optional[List[Dict[str, str]]] = []
 
 class QueryResponse(BaseModel):
     response: str
@@ -116,6 +108,8 @@ class QueryResponse(BaseModel):
     error: Optional[str] = None
     success: bool
     chart_image_base64: Optional[str] = None
+    # ADDED: This field will return the updated history
+    chat_history: List[Dict[str, str]]
 
 # --- Global Instances ---
 db_connector = DatabaseConnector()
@@ -192,9 +186,10 @@ class GraphState(TypedDict):
     sql_query: str
     sql_results: List[Dict[str, Any]]
     final_response: str
-    error_message: Annotated[List[str], "error_messages"]
+    error_message: str
     db_schema_df: pd.DataFrame
     relevant_db_schema_df: pd.DataFrame
+    # UPDATED: chat_history now stores LangChain's BaseMessage objects
     chat_history: List[BaseMessage]
     visualization_data: Optional[Dict[str, Any]]
 
@@ -203,7 +198,8 @@ async def primary_route_node(state: GraphState) -> Dict[str, Any]:
     """Node for the high-level router to decide which sub-agent to use."""
     logging.info(f"NODE: primary_route_node - User Query: {state['user_query']}")
     try:
-        routing_decision = await primary_router.route_query(state['user_query'])
+        # UPDATED: Pass chat_history to the router
+        routing_decision = await primary_router.route_query(state['user_query'], chat_history=state['chat_history'])
         logging.info(f"NODE: primary_route_node - Routing Decision: {routing_decision}")
         return {"routing_decision": routing_decision, "error_message": ""}
     except Exception as e:
@@ -231,7 +227,11 @@ async def sql_route_node(state: GraphState) -> Dict[str, Any]:
     logging.info(f"NODE: sql_route_node - Using specialized SQL Router.")
     try:
         sql_routing_decision = await sql_router.route_query(state['user_query'])
-        return {"routing_decision": sql_routing_decision, "error_message": ""}
+        # --- FIX: MERGE THE NEW ROUTING INFO, DON'T OVERWRITE ---
+        existing_decision = state.get("routing_decision", {}).copy()
+        existing_decision.update(sql_routing_decision)
+        # --------------------------------------------------------
+        return {"routing_decision": existing_decision, "error_message": ""}
     except Exception as e:
         logging.error(f"NODE: sql_route_node - Error from SQL Router: {e}", exc_info=True)
         return {"error_message": f"An error occurred in the SQL routing step: {e}"}
@@ -281,7 +281,6 @@ async def execute_sql_node(state: GraphState) -> Dict[str, Any]:
         logging.error(f"NODE: execute_sql_node - Error executing SQL: {e}", exc_info=True)
         return {"sql_results": [], "error_message": f"An error occurred during SQL execution: {e}"}
 
-# In your main script, replace the existing call_crm_agent_node with this version.
 async def call_crm_agent_node(state: GraphState) -> Dict[str, Any]:
     """Node to invoke the CRM agent and check for failure messages."""
     logging.info(f"NODE: call_crm_agent_node - Calling CRM Agent with query: {state['user_query']}")
@@ -308,15 +307,7 @@ async def call_crm_agent_node(state: GraphState) -> Dict[str, Any]:
     
 async def visualization_node(state: GraphState) -> Dict[str, Any]:
     """Node to generate visualizations if requested."""
-    logging.info(f"NODE: visualization_node - Checking for visualization request")
-    
-    # Check if user asked for visualization
-    query_lower = state["user_query"].lower()
-    visualization_keywords = ["chart", "graph", "plot", "visualize", "pie", "bar", "line"]
-    
-    if not any(keyword in query_lower for keyword in visualization_keywords):
-        logging.info("NODE: visualization_node - No visualization requested")
-        return {"visualization_data": None}
+    logging.info(f"NODE: visualization_node - Generating visualization...")
     
     # Get the data to visualize
     data = state.get("sql_results", [])
@@ -341,6 +332,7 @@ async def generate_final_response_node(state: GraphState) -> Dict[str, Any]:
     """Node to generate the final natural language response to the user."""
     logging.info(f"NODE: generate_final_response_node - Generating final response...")
     
+    # Get the base64 image from the state, if it exists
     visualization = state.get("visualization_data")
     chart_image_base64 = visualization.get("image_base64") if visualization else None
     
@@ -348,7 +340,6 @@ async def generate_final_response_node(state: GraphState) -> Dict[str, Any]:
         if state.get("final_response"):
             response = state["final_response"]
         else:
-            # --- START of changed code ---
             # Pre-format the SQL results into a Markdown table string
             formatted_sql_results = ""
             if state.get('sql_results'):
@@ -361,9 +352,10 @@ async def generate_final_response_node(state: GraphState) -> Dict[str, Any]:
                 "sql_results": formatted_sql_results,
                 "error_message": state.get('error_message', '')
             })
-            # --- END of changed code ---
         
         logging.info(f"NODE: generate_final_response_node - Final Response: {response}")
+        # The key for the image needs to be at the top level of the visualization_data dict
+        # The new logic handles this correctly.
         return {"final_response": response, "error_message": "", "visualization_data": {"chart_image_base64": chart_image_base64}}
     except Exception as e:
         logging.error(f"NODE: generate_final_response_node - Error generating final response: {e}")
@@ -390,6 +382,29 @@ async def handle_error_node(state: GraphState) -> Dict[str, Any]:
     )
     return {"final_response": user_facing_error, "error_message": state.get('error_message'), "visualization_data": None}
 
+async def crm_fallback_node(state: GraphState) -> Dict[str, Any]:
+    """Node to set up the state for SQL fallback."""
+    logging.warning("NODE: crm_fallback_node - CRM agent failed, re-routing to SQL path.")
+    return {
+        "routing_decision": {
+            "tool_name": "SQL_ROUTER_AGENT",
+            "reasoning": "Fallback from CRM agent failure."
+        },
+        "error_message": ""
+    }
+
+# NEW NODE: This node is for the CONTINUE_CONVERSATION tool.
+# It simply passes the user query to the `general_response` node.
+# The primary router handles the logic of whether it's a follow-up.
+async def continue_conversation_node(state: GraphState) -> Dict[str, Any]:
+    """
+    Node to handle the `CONTINUE_CONVERSATION` tool.
+    """
+    logging.info(f"NODE: continue_conversation_node - Continuing conversation...")
+    response = await general_query_chain.ainvoke({"user_query": state['user_query']})
+    
+    return {"final_response": response}
+
 # --- LangGraph Conditional Edges Logic ---
 def primary_route_decision(state: GraphState) -> str:
     """Decides which agent to use based on the high-level router's output."""
@@ -399,6 +414,9 @@ def primary_route_decision(state: GraphState) -> str:
 
     if error:
         return "handle_error"
+    # ADDED: Handle the new tool_name
+    elif tool_name == "CONTINUE_CONVERSATION":
+        return "continue_conversation"
     elif tool_name == "SQL_ROUTER_AGENT":
         return "sql_route_node"
     elif tool_name == "CRM_AGENT":
@@ -426,34 +444,31 @@ def check_for_error(state: GraphState) -> str:
     if state.get("error_message"):
         return "handle_error"
     return "continue"
-# In your main script, replace the existing crm_fallback_decision with this version.
+
 def crm_fallback_decision(state: GraphState) -> str:
     """Decides whether to fallback to SQL based on the CRM agent's result."""
     error = state.get("error_message")
     routing_decision = state.get("routing_decision", {})
     fallback_tool = routing_decision.get("fallback_tool")
-    
-    # If the CRM agent failed and a fallback is defined...
+
     if error and fallback_tool == "SQL_ROUTER_AGENT":
-        # Log the fallback decision
-        logging.warning("NODE: crm_fallback_decision - CRM agent failed, falling back to SQL.")
-        
-        # We need to re-route the query to the SQL path.
-        # The next node needs the `routing_decision` to be for SQL.
-        # Clear the error message so the SQL path doesn't immediately fail.
-        # CRITICAL: We update the state in-place to avoid the concurrency issue.
-        state["routing_decision"]["tool_name"] = "SQL_ROUTER_AGENT"
-        state["routing_decision"]["reasoning"] = "Fallback from CRM agent failure."
-        state["error_message"] = "" 
-        
-        return "sql_route_node"
+        return "crm_fallback_node"
     
-    # If there's an error but no fallback, or a different fallback, go to error handler.
     if error:
         return "handle_error"
         
-    # If the CRM call was successful, continue to the visualization node.
+    # The CRM agent's happy path should check for visualization next.
     return "visualization_node"
+
+def check_for_visualization(state: GraphState) -> str:
+    """Checks if a secondary tool was requested."""
+    routing_decision = state.get("routing_decision", {})
+    secondary_tool = routing_decision.get("secondary_tool")
+
+    if secondary_tool == "VISUALIZATION_AGENT":
+        return "visualization"
+    return "no_visualization"
+
 
 # --- LangGraph Workflow Definition ---
 workflow = StateGraph(GraphState)
@@ -465,10 +480,13 @@ workflow.add_node("sql_route_node", sql_route_node)
 workflow.add_node("generate_sql", generate_sql_node)
 workflow.add_node("execute_sql", execute_sql_node)
 workflow.add_node("call_crm_agent", call_crm_agent_node)
+# NEW: Added the new node
+workflow.add_node("continue_conversation", continue_conversation_node) 
 workflow.add_node("visualization_node", visualization_node)
 workflow.add_node("generate_final_response", generate_final_response_node)
 workflow.add_node("general_response", general_query_response_node)
 workflow.add_node("handle_error", handle_error_node)
+workflow.add_node("crm_fallback_node", crm_fallback_node)
 
 # Set the entry point
 workflow.set_entry_point("primary_route_node")
@@ -482,11 +500,13 @@ workflow.add_conditional_edges(
         "call_crm_agent": "call_crm_agent",
         "clarify_query_node": "clarify_query_node",
         "general_response": "general_response",
+        "continue_conversation": "continue_conversation", # ADDED: New edge for the new node
         "handle_error": "handle_error"
     }
 )
 
 workflow.add_edge("clarify_query_node", END)
+workflow.add_edge("continue_conversation", END) # NEW: `continue_conversation` can be a final state
 
 workflow.add_conditional_edges(
     "sql_route_node",
@@ -506,25 +526,29 @@ workflow.add_conditional_edges(
     }
 )
 
+# UPDATED: We now check for visualization after data is fetched from SQL or CRM fallback
 workflow.add_conditional_edges(
     "execute_sql",
-    check_for_error,
+    check_for_visualization,
     {
-        "continue": "visualization_node",
-        "handle_error": "handle_error"
+        "visualization": "visualization_node",
+        "no_visualization": "generate_final_response"
     }
 )
+
 workflow.add_conditional_edges(
     "call_crm_agent",
     crm_fallback_decision,
     {
-        "sql_route_node": "sql_route_node", # The new fallback path
+        "crm_fallback_node": "crm_fallback_node", 
         "visualization_node": "visualization_node",
         "handle_error": "handle_error"
     }
 )
 
-workflow.add_edge("call_crm_agent", "visualization_node")
+workflow.add_edge("crm_fallback_node", "sql_route_node")
+
+# Remaining edges
 workflow.add_edge("visualization_node", "generate_final_response")
 workflow.add_edge("general_response", "generate_final_response")
 workflow.add_edge("generate_final_response", END)
@@ -566,6 +590,14 @@ async def initial_app_setup():
 # --- API Endpoints ---
 @app.post("/query", response_model=QueryResponse)
 async def process_query(request: QueryRequest):
+    # Convert dict-based chat history from Pydantic model to LangChain's BaseMessage format
+    langchain_chat_history = []
+    for message in request.chat_history:
+        if message.get("role") == "user":
+            langchain_chat_history.append(HumanMessage(content=message.get("content")))
+        elif message.get("role") == "assistant":
+            langchain_chat_history.append(AIMessage(content=message.get("content")))
+
     initial_state: GraphState = {
         "user_query": request.query,
         "routing_decision": {},
@@ -575,7 +607,8 @@ async def process_query(request: QueryRequest):
         "error_message": "",
         "db_schema_df": pd.DataFrame(),
         "relevant_db_schema_df": pd.DataFrame(),
-        "chat_history": [],
+        # PASSING THE CONVERSATION HISTORY
+        "chat_history": langchain_chat_history,
         "visualization_data": None
     }
 
@@ -586,22 +619,49 @@ async def process_query(request: QueryRequest):
         if final_state.get("visualization_data") and "chart_image_base64" in final_state["visualization_data"]:
             chart_image_base64 = final_state["visualization_data"]["chart_image_base64"]
 
+        # Append the new user query and the AI's final response to the history
+        updated_chat_history = langchain_chat_history + [
+            HumanMessage(content=request.query),
+            AIMessage(content=final_state.get("final_response", "No response generated."))
+        ]
+        
+        # Convert the LangChain history back to a dictionary format for JSON serialization
+        serializable_history = [
+            {"role": "user" if isinstance(msg, HumanMessage) else "assistant", "content": msg.content}
+            for msg in updated_chat_history
+        ]
+
         response_data = jsonable_encoder({
             "response": final_state.get("final_response", "No response generated."),
             "success": not bool(final_state.get("error_message")),
             "error": final_state.get("error_message"),
             "sql_query": final_state.get("sql_query") if request.include_sql else None,
             "sql_results": final_state.get("sql_results", []) if request.include_results else None,
-            "chart_image_base64": chart_image_base64 if request.include_visualization else None
+            "chart_image_base64": chart_image_base64 if request.include_visualization else None,
+            # RETURNING THE UPDATED HISTORY
+            "chat_history": serializable_history
         }, custom_encoder={Decimal: float})
 
         return JSONResponse(content=response_data)
     
     except Exception as e:
         logging.error(f"Error processing query: {e}", exc_info=True)
+        # On error, we still want to return a response with history for the front-end
+        updated_chat_history = langchain_chat_history + [
+            HumanMessage(content=request.query),
+            AIMessage(content="I'm sorry, an internal error occurred.")
+        ]
+        serializable_history = [
+            {"role": "user" if isinstance(msg, HumanMessage) else "assistant", "content": msg.content}
+            for msg in updated_chat_history
+        ]
+        
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An error occurred while processing your query: {str(e)}"
+            detail=jsonable_encoder({
+                "error": f"An error occurred while processing your query: {str(e)}",
+                "chat_history": serializable_history
+            })
         )
 
 @app.get("/health")
